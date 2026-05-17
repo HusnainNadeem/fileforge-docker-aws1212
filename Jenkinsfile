@@ -2,189 +2,110 @@ pipeline {
     agent any
 
     environment {
-        GIT_REPO_URL  = 'https://github.com/HusnainNadeem/fileforge-docker-aws1212.git'
-        GIT_BRANCH    = 'main'
-        SERVER_IP     = '3.145.179.209'
-        COMPOSE_FILE  = 'docker-compose.yaml'
-        HEALTH_URL    = 'http://3.145.179.209'
-    }
-
-    options {
-        timestamps()
-        timeout(time: 30, unit: 'MINUTES')
-        buildDiscarder(logRotator(numToKeepStr: '10'))
-        disableConcurrentBuilds()
+        GITHUB_REPO = 'https://github.com/HusnainNadeem/fileforge-docker-aws1212.git'
+        BRANCH = 'main'
+        IMAGE_NAME = 'fileforge-app'
+        CONTAINER_NAME = 'fileforge-container'
+        REMOTE_SERVER = '3.145.179.209'
+        REMOTE_USER = 'ubuntu'
     }
 
     stages {
 
-        // ══════════════════════════════════════════════════════════════════
-        // STEP 1 — STOP RUNNING CONTAINERS
-        // ══════════════════════════════════════════════════════════════════
         stage('Stop Running Containers') {
             steps {
-                echo '🛑 Stopping all running containers...'
+                echo '🛑 Stopping running containers...'
                 sh '''
-                    docker-compose -f ${COMPOSE_FILE} down --remove-orphans || true
-
-                    for NAME in nginx frontend backend mongo; do
-                        if [ "$(docker ps -q -f name=^${NAME}$)" ]; then
-                            echo "  Force-stopping: ${NAME}"
-                            docker stop ${NAME} && docker rm ${NAME} || true
-                        fi
-                    done
-
-                    echo "✅ All containers stopped."
-                    docker ps
+                    docker ps -q -f name=${CONTAINER_NAME} | xargs -r docker stop
+                    docker ps -aq -f name=${CONTAINER_NAME} | xargs -r docker rm
+                    echo "✅ Containers stopped and removed."
                 '''
             }
         }
 
-        // ══════════════════════════════════════════════════════════════════
-        // STEP 2 — PULL CODE FROM GITHUB
-        // ══════════════════════════════════════════════════════════════════
         stage('Pull Code from GitHub') {
             steps {
-                echo "📥 Pulling code from: ${GIT_REPO_URL} (branch: ${GIT_BRANCH})"
-                git(
-                    url: "${GIT_REPO_URL}",
-                    branch: "${GIT_BRANCH}",
-                    changelog: true,
-                    poll: true
-                )
+                echo '📥 Pulling code from GitHub...'
+                git credentialsId: 'github-credentials',
+                    url: "${GITHUB_REPO}",
+                    branch: "${BRANCH}"
                 echo '✅ Code pulled successfully.'
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                echo '🔨 Building Docker image...'
                 sh '''
-                    echo "--- Repo structure ---"
-                    ls -la
+                    docker build -t ${IMAGE_NAME}:latest .
+                    echo "✅ Docker image built successfully."
                 '''
             }
         }
 
-        // ══════════════════════════════════════════════════════════════════
-        // STEP 3 — BUILD DOCKER IMAGES
-        // ══════════════════════════════════════════════════════════════════
-        stage('Build Docker Images') {
+        stage('Run New Container') {
             steps {
-                echo '🔨 Building Docker images...'
+                echo '🚀 Starting new container...'
                 sh '''
-                    echo "[1/2] Building frontend image..."
-                    docker build \
-                        --no-cache \
-                        --tag frontend:latest \
-                        --tag frontend:${BUILD_NUMBER} \
-                        --file frontend/Dockerfile \
-                        ./frontend
-
-                    echo "[2/2] Building backend image..."
-                    docker build \
-                        --no-cache \
-                        --tag backend:latest \
-                        --tag backend:${BUILD_NUMBER} \
-                        --file backend/Dockerfile \
-                        ./backend
-
-                    echo "✅ Both images built successfully."
-                    docker images | grep -E "frontend|backend"
+                    docker run -d \
+                        --name ${CONTAINER_NAME} \
+                        -p 80:80 \
+                        --restart unless-stopped \
+                        ${IMAGE_NAME}:latest
+                    echo "✅ Container started successfully."
                 '''
             }
         }
 
-        // ══════════════════════════════════════════════════════════════════
-        // STEP 4 — DEPLOY
-        // MongoDB is NOT recreated — data volume stays safe.
-        // ══════════════════════════════════════════════════════════════════
-        stage('Deploy') {
+        stage('Deploy to Server 3.145.179.209') {
             steps {
-                echo "🚀 Deploying FileForge PRO to ${SERVER_IP}..."
-                sh '''
-                    # Start MongoDB first (skip if already running)
-                    docker-compose -f ${COMPOSE_FILE} up -d mongo
-                    sleep 5
+                echo '🌍 Deploying website to remote server...'
+                withCredentials([sshUserPrivateKey(
+                    credentialsId: 'aws-server-ssh-key',
+                    keyFileVariable: 'SSH_KEY'
+                )]) {
+                    sh '''
+                        # Copy docker-compose or project files to remote server
+                        scp -i $SSH_KEY -o StrictHostKeyChecking=no \
+                            docker-compose.yaml \
+                            ${REMOTE_USER}@${REMOTE_SERVER}:/home/${REMOTE_USER}/app/
 
-                    # Recreate app containers with newly built images
-                    docker-compose -f ${COMPOSE_FILE} up -d \
-                        --force-recreate \
-                        --remove-orphans \
-                        backend frontend nginx
+                        # SSH into remote server and deploy
+                        ssh -i $SSH_KEY -o StrictHostKeyChecking=no \
+                            ${REMOTE_USER}@${REMOTE_SERVER} << 'EOF'
 
-                    echo "--- Running containers after deploy ---"
-                    docker-compose -f ${COMPOSE_FILE} ps
-                '''
-            }
-        }
+                            echo "🛑 Stopping old containers..."
+                            cd /home/ec2-user/app
+                            docker ps -q -f name=fileforge-container | xargs -r docker stop
+                            docker ps -aq -f name=fileforge-container | xargs -r docker rm
 
-        // ══════════════════════════════════════════════════════════════════
-        // STEP 5 — HEALTH CHECK ON PRODUCTION IP
-        // ══════════════════════════════════════════════════════════════════
-        stage('Health Check') {
-            steps {
-                echo "❤️  Verifying production server at ${HEALTH_URL} ..."
-                retry(6) {
-                    sleep(time: 10, unit: 'SECONDS')
-                    sh "curl --fail --silent --max-time 10 ${HEALTH_URL}"
+                            echo "🔨 Pulling latest Docker image..."
+                            docker pull fileforge-app:latest || true
+
+                            echo "🚀 Starting new container..."
+                            docker run -d \
+                                --name fileforge-container \
+                                -p 80:80 \
+                                --restart unless-stopped \
+                                fileforge-app:latest
+
+                            echo "✅ Deployment successful!"
+                            docker ps
+EOF
+                    '''
                 }
-                echo "✅ FileForge PRO is LIVE at http://${SERVER_IP}"
+                echo '✅ Website deployed successfully on 3.145.179.209'
             }
         }
 
-        // ══════════════════════════════════════════════════════════════════
-        // STEP 6 — CLEANUP OLD IMAGES
-        // ══════════════════════════════════════════════════════════════════
-        stage('Cleanup Old Images') {
-            steps {
-                echo '🧹 Removing dangling/old Docker images...'
-                sh '''
-                    docker image prune -f
-
-                    docker images frontend --format "{{.Tag}}" | \
-                        grep -E "^[0-9]+$" | sort -rn | tail -n +4 | \
-                        xargs -r -I{} docker rmi frontend:{} || true
-
-                    docker images backend --format "{{.Tag}}" | \
-                        grep -E "^[0-9]+$" | sort -rn | tail -n +4 | \
-                        xargs -r -I{} docker rmi backend:{} || true
-
-                    echo "✅ Cleanup done."
-                '''
-            }
-        }
     }
 
-    // ══════════════════════════════════════════════════════════════════════
-    // POST ACTIONS
-    // ══════════════════════════════════════════════════════════════════════
     post {
         success {
-            echo """
-╔═══════════════════════════════════════════════════════╗
-║   ✅  FileForge PRO — Build #${BUILD_NUMBER} DEPLOYED OK     ║
-║   🌐  Live at → http://16.176.232.43                  ║
-╚═══════════════════════════════════════════════════════╝
-            """
+            echo '✅ Pipeline completed! Website is live at http://3.145.179.209'
         }
-
         failure {
-            echo '❌ Pipeline FAILED — rolling back to previous build...'
-            sh '''
-                PREV=$((BUILD_NUMBER - 1))
-                FRONTEND_EXISTS=$(docker image inspect frontend:${PREV} > /dev/null 2>&1 && echo yes || echo no)
-                BACKEND_EXISTS=$(docker image inspect backend:${PREV}  > /dev/null 2>&1 && echo yes || echo no)
-
-                if [ "$FRONTEND_EXISTS" = "yes" ] && [ "$BACKEND_EXISTS" = "yes" ]; then
-                    echo "Rolling back to build #${PREV}..."
-                    docker tag frontend:${PREV} frontend:latest
-                    docker tag backend:${PREV}  backend:latest
-                    docker-compose -f ${COMPOSE_FILE} up -d \
-                        --force-recreate frontend backend nginx
-                    echo "✅ Rolled back to build #${PREV}."
-                else
-                    echo "⚠️  No rollback images found. Manual intervention required."
-                fi
-            '''
-        }
-
-        always {
-            echo "Build #${BUILD_NUMBER} finished → ${currentBuild.currentResult}"
+            echo '❌ Pipeline failed! Check logs above.'
         }
     }
 }
