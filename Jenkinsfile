@@ -4,9 +4,9 @@ pipeline {
     environment {
         GIT_REPO_URL  = 'https://github.com/HusnainNadeem/fileforge-docker-aws1212.git'
         GIT_BRANCH    = 'main'
-        SERVER_IP     = '16.176.232.43'
+        SERVER_IP     = '3.145.179.209'
         COMPOSE_FILE  = 'docker-compose.yaml'
-        HEALTH_URL    = 'http://16.176.232.43'
+        HEALTH_URL    = 'http://3.145.179.209'
     }
 
     options {
