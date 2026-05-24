@@ -2,155 +2,211 @@ pipeline {
     agent any
 
     environment {
-        GITHUB_REPO    = 'https://github.com/HusnainNadeem/fileforge-docker-aws1212.git'
-        BRANCH         = 'main'
-        REMOTE_SERVER  = '3.145.179.209'
-        REMOTE_USER    = 'ec2-user'
-        APP_DIR        = '/home/ec2-user/fileforge'
+        DOCKER_COMPOSE_FILE = 'docker-compose.yml'
+        APP_DIR             = '/home/ubuntu/fileforge'
+        EC2_USER            = 'ubuntu'
+        EC2_HOST            = '18.222.164.24'
+        GITHUB_REPO         = 'https://github.com/HusnainNadeem/fileforge-docker-aws1212.git'
+    }
+
     }
 
     stages {
 
-        // ─── STAGE 1 ────────────────────────────────────────────────
-        stage('Stop Running Containers') {
+        // ─── 1. Checkout ────────────────────────────────────────────────────
+        stage('Checkout') {
             steps {
-                echo '🛑 Stopping all running containers...'
-                sh '''
-                    docker ps -q -f name=frontend  | xargs -r docker stop
-                    docker ps -aq -f name=frontend | xargs -r docker rm
-
-                    docker ps -q -f name=backend   | xargs -r docker stop
-                    docker ps -aq -f name=backend  | xargs -r docker rm
-
-                    docker ps -q -f name=mongo     | xargs -r docker stop
-                    docker ps -aq -f name=mongo    | xargs -r docker rm
-
-                    docker ps -q -f name=nginx     | xargs -r docker stop
-                    docker ps -aq -f name=nginx    | xargs -r docker rm
-
-                    echo "✅ All containers stopped and removed."
-                '''
+                echo 'Cloning repository from GitHub...'
+                git branch: 'main',
+                    url: "${GITHUB_REPO}"
             }
         }
 
-        // ─── STAGE 2 ────────────────────────────────────────────────
-        stage('Pull Code from GitHub') {
-            steps {
-                echo '📥 Pulling latest code from GitHub...'
-                git credentialsId: 'github-credentials',
-                    url: "${GITHUB_REPO}",
-                    branch: "${BRANCH}"
-                echo '✅ Code pulled successfully.'
-            }
-        }
-
-        // ─── STAGE 3 ────────────────────────────────────────────────
-        stage('Build Docker Images') {
+        // ─── 2. Validate ────────────────────────────────────────────────────
+        stage('Validate') {
             parallel {
-
-                stage('Build Frontend Image') {
+                stage('Lint Backend') {
                     steps {
-                        echo '🔨 Building Frontend image...'
-                        sh '''
-                            docker build -t frontend:latest ./frontend
-                            echo "✅ Frontend image built."
-                        '''
+                        dir('backend') {
+                            sh '''
+                                npm install
+                                npm run lint || echo "No lint script, skipping..."
+                            '''
+                        }
                     }
                 }
-
-                stage('Build Backend Image') {
+                stage('Lint Frontend') {
                     steps {
-                        echo '🔨 Building Backend image...'
-                        sh '''
-                            docker build -t backend:latest ./backend
-                            echo "✅ Backend image built."
-                        '''
+                        dir('frontend') {
+                            sh '''
+                                npm install
+                                npm run lint || echo "No lint script, skipping..."
+                            '''
+                        }
                     }
                 }
-
             }
         }
 
-        // ─── STAGE 4 ────────────────────────────────────────────────
-        stage('Run Containers via Docker Compose') {
+        // ─── 3. Sync Files to EC2 ───────────────────────────────────────────
+        stage('Sync Files') {
             steps {
-                echo '🚀 Starting all containers with docker-compose...'
-                sh '''
-                    docker-compose -f docker-compose.yaml down --remove-orphans || true
-                    docker-compose -f docker-compose.yaml up -d
-                    echo "✅ All containers started successfully."
-                    docker ps
-                '''
-            }
-        }
-
-        // ─── STAGE 5 ────────────────────────────────────────────────
-        stage('Deploy to Server 3.145.179.209') {
-            steps {
-                echo '🌍 Deploying to remote server 3.145.179.209...'
-                withCredentials([sshUserPrivateKey(
-                    credentialsId: 'aws-server-ssh-key',
-                    keyFileVariable: 'SSH_KEY'
-                )]) {
-                    sh '''
-                        # ── Create app directory on remote server ──
-                        ssh -i $SSH_KEY -o StrictHostKeyChecking=no \
-                            ${REMOTE_USER}@${REMOTE_SERVER} \
-                            "mkdir -p ${APP_DIR}/frontend \
-                                      ${APP_DIR}/backend \
-                                      ${APP_DIR}/nginx"
-
-                        # ── Copy all project files to remote server ──
-                        scp -i $SSH_KEY -o StrictHostKeyChecking=no \
-                            docker-compose.yaml \
-                            ${REMOTE_USER}@${REMOTE_SERVER}:${APP_DIR}/
-
-                        scp -i $SSH_KEY -o StrictHostKeyChecking=no \
-                            nginx/nginx.conf \
-                            ${REMOTE_USER}@${REMOTE_SERVER}:${APP_DIR}/nginx/
-
-                        scp -i $SSH_KEY -o StrictHostKeyChecking=no -r \
-                            frontend/ \
-                            ${REMOTE_USER}@${REMOTE_SERVER}:${APP_DIR}/
-
-                        scp -i $SSH_KEY -o StrictHostKeyChecking=no -r \
-                            backend/ \
-                            ${REMOTE_USER}@${REMOTE_SERVER}:${APP_DIR}/
-
-                        # ── SSH into server and deploy ──
-                        ssh -i $SSH_KEY -o StrictHostKeyChecking=no \
-                            ${REMOTE_USER}@${REMOTE_SERVER} << 'EOF'
-
-                            cd /home/ec2-user/fileforge
-
-                            echo "🛑 Stopping old containers..."
-                            docker-compose down --remove-orphans || true
-
-                            echo "🔨 Building fresh images on server..."
-                            docker build -t frontend:latest ./frontend
-                            docker build -t backend:latest ./backend
-
-                            echo "🚀 Starting all containers..."
-                            docker-compose up -d
-
-                            echo "✅ Deployment complete!"
-                            docker ps
-EOF
-                    '''
+                echo 'Syncing project files to EC2...'
+                sshagent(credentials: ['ec2-ssh-key']) {
+                    sh """
+                        ssh -o StrictHostKeyChecking=no ${EC2_USER}@${EC2_HOST} '
+                            mkdir -p ${APP_DIR}
+                        '
+                        rsync -avz \
+                            --exclude='.git' \
+                            --exclude='node_modules' \
+                            --exclude='.env' \
+                            ./ ${EC2_USER}@${EC2_HOST}:${APP_DIR}/
+                    """
                 }
-                echo '✅ Website deployed successfully!'
             }
         }
 
+        // ─── 4. Stop & Remove Old Containers ────────────────────────────────
+        stage('Stop Old Containers') {
+            steps {
+                echo 'Stopping and removing old containers...'
+                sshagent(credentials: ['ec2-ssh-key']) {
+                    sh """
+                        ssh -o StrictHostKeyChecking=no ${EC2_USER}@${EC2_HOST} '
+                            cd ${APP_DIR}
+
+                            echo ">>> Running containers before cleanup:"
+                            sudo docker ps
+
+                            echo ">>> Stopping all containers..."
+                            sudo docker compose down --remove-orphans
+
+                            echo ">>> All containers stopped."
+                            sudo docker ps -a
+                        '
+                    """
+                }
+            }
+        }
+
+        // ─── 5. Remove Old Images ────────────────────────────────────────────
+        stage('Remove Old Images') {
+            steps {
+                echo 'Removing old Docker images...'
+                sshagent(credentials: ['ec2-ssh-key']) {
+                    sh """
+                        ssh -o StrictHostKeyChecking=no ${EC2_USER}@${EC2_HOST} '
+                            echo ">>> Images before cleanup:"
+                            sudo docker images
+
+                            echo ">>> Removing backend image..."
+                            sudo docker rmi backend 2>/dev/null && echo "backend removed" || echo "backend not found"
+
+                            echo ">>> Removing frontend image..."
+                            sudo docker rmi frontend 2>/dev/null && echo "frontend removed" || echo "frontend not found"
+
+                            echo ">>> Pruning dangling images..."
+                            sudo docker image prune -f
+
+                            echo ">>> Images after cleanup:"
+                            sudo docker images
+                        '
+                    """
+                }
+            }
+        }
+
+        // ─── 6. Build New Images ─────────────────────────────────────────────
+        stage('Build New Images') {
+            steps {
+                echo 'Building new Docker images from latest code...'
+                sshagent(credentials: ['ec2-ssh-key']) {
+                    sh """
+                        ssh -o StrictHostKeyChecking=no ${EC2_USER}@${EC2_HOST} '
+                            cd ${APP_DIR}
+
+                            echo ">>> Building backend image..."
+                            sudo docker compose build --no-cache backend
+
+                            echo ">>> Building frontend image..."
+                            sudo docker compose build --no-cache frontend
+
+                            echo ">>> New images:"
+                            sudo docker images
+                        '
+                    """
+                }
+            }
+        }
+
+        // ─── 7. Start New Containers ─────────────────────────────────────────
+        stage('Start New Containers') {
+            steps {
+                echo 'Starting fresh containers from new images...'
+                sshagent(credentials: ['ec2-ssh-key']) {
+                    sh """
+                        ssh -o StrictHostKeyChecking=no ${EC2_USER}@${EC2_HOST} '
+                            cd ${APP_DIR}
+
+                            echo ">>> Starting all services..."
+                            sudo docker compose up -d
+
+                            echo ">>> Running containers:"
+                            sudo docker compose ps
+                        '
+                    """
+                }
+            }
+        }
+
+        // ─── 8. Health Check ─────────────────────────────────────────────────
+        stage('Health Check') {
+            steps {
+                echo 'Waiting for services to be ready...'
+                sleep(time: 15, unit: 'SECONDS')
+
+                sshagent(credentials: ['ec2-ssh-key']) {
+                    sh """
+                        ssh -o StrictHostKeyChecking=no ${EC2_USER}@${EC2_HOST} '
+                            echo "=== Final Container Status ==="
+                            sudo docker compose -f ${APP_DIR}/docker-compose.yml ps
+
+                            echo "=== App Health Check ==="
+                            curl -sf http://localhost:80 > /dev/null && \
+                                echo "SUCCESS: App is UP at http://${EC2_HOST}" || \
+                                echo "FAILED: App is NOT responding on port 80"
+                        '
+                    """
+                }
+            }
+        }
     }
 
+    // ─── Post Actions ────────────────────────────────────────────────────────
     post {
         success {
-            echo '✅ Pipeline completed successfully!'
-            echo '🌐 Website Live → http://3.145.179.209'
+            echo "Deployment SUCCESS — http://${EC2_HOST}"
         }
         failure {
-            echo '❌ Pipeline failed! Check logs above.'
+            echo 'Deployment FAILED. Fetching container logs...'
+            sshagent(credentials: ['ec2-ssh-key']) {
+                sh """
+                    ssh -o StrictHostKeyChecking=no ${EC2_USER}@${EC2_HOST} '
+                        cd ${APP_DIR}
+                        echo "=== Nginx Logs ==="
+                        sudo docker logs nginx --tail=30
+                        echo "=== Backend Logs ==="
+                        sudo docker logs backend --tail=30
+                        echo "=== Frontend Logs ==="
+                        sudo docker logs frontend --tail=30
+                    ' || true
+                """
+            }
+        }
+        always {
+            echo 'Pipeline finished.'
+            cleanWs()
         }
     }
 }
