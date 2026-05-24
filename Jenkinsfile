@@ -5,6 +5,7 @@ pipeline {
         APP_DIR  = '/home/ubuntu/fileforge'
         EC2_USER = 'ubuntu'
         EC2_HOST = '18.222.164.24'
+        COMPOSE  = 'docker-compose.yaml'
     }
 
     triggers {
@@ -25,7 +26,7 @@ pipeline {
                 sshagent(credentials: ['ec2-ssh-key']) {
                     sh "ssh -o StrictHostKeyChecking=no ${EC2_USER}@${EC2_HOST} 'mkdir -p ${APP_DIR}'"
                     sh """
-                        rsync -avz \
+                        rsync -avz -e "ssh -o StrictHostKeyChecking=no" \
                             --exclude='.git' \
                             --exclude='node_modules' \
                             --exclude='.env' \
@@ -39,8 +40,12 @@ pipeline {
             steps {
                 sshagent(credentials: ['ec2-ssh-key']) {
                     sh """
-                        ssh -o StrictHostKeyChecking=no ${EC2_USER}@${EC2_HOST} \
-                        'cd ${APP_DIR} && sudo docker compose down --remove-orphans && sudo docker ps -a'
+                        ssh -o StrictHostKeyChecking=no ${EC2_USER}@${EC2_HOST} '
+                            cd ${APP_DIR}
+                            sudo docker compose -f ${COMPOSE} down --remove-orphans || true
+                            sudo docker rm -f mongo backend frontend nginx 2>/dev/null || true
+                            sudo docker ps -a
+                        '
                     """
                 }
             }
@@ -50,8 +55,11 @@ pipeline {
             steps {
                 sshagent(credentials: ['ec2-ssh-key']) {
                     sh """
-                        ssh -o StrictHostKeyChecking=no ${EC2_USER}@${EC2_HOST} \
-                        'sudo docker rmi backend frontend 2>/dev/null || true && sudo docker image prune -f && sudo docker images'
+                        ssh -o StrictHostKeyChecking=no ${EC2_USER}@${EC2_HOST} '
+                            sudo docker rmi backend frontend 2>/dev/null || true
+                            sudo docker image prune -f
+                            sudo docker images
+                        '
                     """
                 }
             }
@@ -61,8 +69,12 @@ pipeline {
             steps {
                 sshagent(credentials: ['ec2-ssh-key']) {
                     sh """
-                        ssh -o StrictHostKeyChecking=no ${EC2_USER}@${EC2_HOST} \
-                        'cd ${APP_DIR} && sudo docker compose build --no-cache backend && sudo docker compose build --no-cache frontend && sudo docker images'
+                        ssh -o StrictHostKeyChecking=no ${EC2_USER}@${EC2_HOST} '
+                            cd ${APP_DIR}
+                            sudo docker compose -f ${COMPOSE} build --no-cache backend
+                            sudo docker compose -f ${COMPOSE} build --no-cache frontend
+                            sudo docker images
+                        '
                     """
                 }
             }
@@ -72,8 +84,11 @@ pipeline {
             steps {
                 sshagent(credentials: ['ec2-ssh-key']) {
                     sh """
-                        ssh -o StrictHostKeyChecking=no ${EC2_USER}@${EC2_HOST} \
-                        'cd ${APP_DIR} && sudo docker compose up -d && sudo docker compose ps'
+                        ssh -o StrictHostKeyChecking=no ${EC2_USER}@${EC2_HOST} '
+                            cd ${APP_DIR}
+                            sudo docker compose -f ${COMPOSE} up -d
+                            sudo docker compose -f ${COMPOSE} ps
+                        '
                     """
                 }
             }
@@ -81,11 +96,13 @@ pipeline {
 
         stage('Health Check') {
             steps {
-                sleep(time: 15, unit: 'SECONDS')
+                sleep(time: 20, unit: 'SECONDS')
                 sshagent(credentials: ['ec2-ssh-key']) {
                     sh """
-                        ssh -o StrictHostKeyChecking=no ${EC2_USER}@${EC2_HOST} \
-                        'sudo docker compose -f ${APP_DIR}/docker-compose.yml ps && curl -sf http://localhost:80 > /dev/null && echo "SUCCESS: App is UP" || echo "FAILED: App not responding"'
+                        ssh -o StrictHostKeyChecking=no ${EC2_USER}@${EC2_HOST} '
+                            sudo docker compose -f ${APP_DIR}/${COMPOSE} ps
+                            curl -sf http://localhost:80 > /dev/null && echo "SUCCESS: App is UP" || echo "FAILED: App not responding"
+                        '
                     """
                 }
             }
@@ -100,8 +117,11 @@ pipeline {
             echo 'Deployment FAILED - check logs below'
             sshagent(credentials: ['ec2-ssh-key']) {
                 sh """
-                    ssh -o StrictHostKeyChecking=no ${EC2_USER}@${EC2_HOST} \
-                    'sudo docker logs nginx --tail=30; sudo docker logs backend --tail=30; sudo docker logs frontend --tail=30' || true
+                    ssh -o StrictHostKeyChecking=no ${EC2_USER}@${EC2_HOST} '
+                        sudo docker logs nginx --tail=20 2>/dev/null || true
+                        sudo docker logs backend --tail=20 2>/dev/null || true
+                        sudo docker logs frontend --tail=20 2>/dev/null || true
+                    '
                 """
             }
         }
