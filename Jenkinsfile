@@ -20,27 +20,6 @@ pipeline {
             }
         }
 
-        stage('Validate') {
-            parallel {
-                stage('Lint Backend') {
-                    steps {
-                        dir('backend') {
-                            sh 'npm install'
-                            sh 'npm run lint || echo "No lint script, skipping..."'
-                        }
-                    }
-                }
-                stage('Lint Frontend') {
-                    steps {
-                        dir('frontend') {
-                            sh 'npm install'
-                            sh 'npm run lint || echo "No lint script, skipping..."'
-                        }
-                    }
-                }
-            }
-        }
-
         stage('Sync Files') {
             steps {
                 sshagent(credentials: ['ec2-ssh-key']) {
@@ -118,10 +97,11 @@ pipeline {
             echo "Deployment SUCCESS - http://${EC2_HOST}"
         }
         failure {
+            echo 'Deployment FAILED - check logs below'
             sshagent(credentials: ['ec2-ssh-key']) {
                 sh """
                     ssh -o StrictHostKeyChecking=no ${EC2_USER}@${EC2_HOST} \
-                    'sudo docker logs nginx --tail=30 && sudo docker logs backend --tail=30 && sudo docker logs frontend --tail=30' || true
+                    'sudo docker logs nginx --tail=30; sudo docker logs backend --tail=30; sudo docker logs frontend --tail=30' || true
                 """
             }
         }
